@@ -1,0 +1,7 @@
+post_install() {
+  echo ":: archfanctl: запусти GUI (archfanctl-gui), настрой кривые и нажми Apply — он предложит включить службу."
+  echo ":: или вручную: sudo systemctl enable --now archfanctl.service"
+  echo ":: NVIDIA: sudo pacman -S python-nvidia-ml-py (нужен драйвер 520+). Для чипов материнки: модуль nct6775 / it87."
+}
+post_upgrade() { systemctl try-restart archfanctl.service >/dev/null 2>&1 || true; }
+pre_remove() { systemctl disable --now archfanctl.service >/dev/null 2>&1 || true; }

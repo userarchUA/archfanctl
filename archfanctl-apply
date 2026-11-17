@@ -1,0 +1,56 @@
+#!/usr/bin/python
+"""Run via pkexec: validates JSON config from stdin and installs it atomically."""
+import sys, os, json, re, subprocess
+
+CONFIG = "/etc/archfanctl/config.json"
+FAN = re.compile(r"^(hw:[^:]+:[^:]+:pwm\d+|nv:[^:]+:fan\d+)$")
+TEMP = re.compile(r"^(hw:[^:]+:[^:]+:temp\d+|nv:[^:]+:temp)$")
+
+
+def num(v, lo, hi, what):
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+        raise ValueError(f"{what} must be a number in {lo}..{hi}")
+    return float(v)
+
+
+def validate(cfg):
+    out, used = [], set()
+    for c in cfg.get("controls", []):
+        if not FAN.match(str(c["fan"])): raise ValueError("bad fan id")
+        if not c["temps"] or not all(TEMP.match(str(t)) for t in c["temps"]): raise ValueError("bad temp sources")
+        pts = c["curve"]
+        if not 2 <= len(pts) <= 16: raise ValueError("curve needs 2..16 points")
+        pts = [[num(t, 0, 130, "temp"), num(p, 0, 100, "pct")] for t, p in pts]
+        if any(a[0] >= b[0] for a, b in zip(pts, pts[1:])): raise ValueError("curve temps must increase")
+        mn, mx = num(c["min_pct"], 0, 100, "min"), num(c["max_pct"], 0, 100, "max")
+        if mn > mx: raise ValueError("min > max")
+        n = {"id": re.sub(r"\W", "", str(c["id"]))[:16] or "x", "name": str(c.get("name", ""))[:40],
+             "fan": c["fan"], "temps": list(map(str, c["temps"])), "curve": pts, "min_pct": mn, "max_pct": mx,
+             "hyst": num(c["hyst"], 0, 20, "hyst"), "up_rate": num(c["up_rate"], 0.5, 100, "up_rate"),
+             "down_rate": num(c["down_rate"], 0.5, 100, "down_rate"),
+             "critical": num(c["critical"], 50, 110, "critical"), "enabled": bool(c.get("enabled", True))}
+        if n["enabled"]:
+            if n["fan"] in used: raise ValueError("same fan used by two enabled controls")
+            used.add(n["fan"])
+        out.append(n)
+    return {"version": 1, "interval": num(cfg.get("interval", 1.0), 0.2, 10, "interval"), "controls": out}
+
+
+def main():
+    if os.geteuid() != 0:
+        sys.exit("must run as root (use pkexec)")
+    try:
+        cfg = validate(json.load(sys.stdin))
+    except Exception as e:
+        sys.exit(f"invalid config: {e}")
+    os.makedirs(os.path.dirname(CONFIG), exist_ok=True)
+    tmp = CONFIG + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cfg, f, indent=2)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, CONFIG)
+    if "--enable" in sys.argv:
+        subprocess.run(["systemctl", "enable", "--now", "archfanctl.service"], check=False)
+
+
+main()

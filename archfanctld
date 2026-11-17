@@ -1,0 +1,99 @@
+#!/usr/bin/python
+import sys, os, json, time, signal, logging
+sys.path.insert(0, "/usr/lib/archfanctl")
+import core
+
+logging.basicConfig(level=logging.INFO, format="archfanctld: %(message)s")
+log = logging.getLogger()
+
+
+def load_cfg():
+    with open(core.CONFIG) as f:
+        cfg = json.load(f)
+    return [c for c in cfg.get("controls", []) if c.get("enabled", True)], max(0.2, float(cfg.get("interval", 1.0)))
+
+
+def restore_all():
+    try:
+        ctrls, _ = load_cfg()
+    except Exception:
+        return
+    for c in ctrls:
+        try:
+            core.make_fan(c["fan"]).release()
+        except Exception:
+            pass
+
+
+def write_status(ctls):
+    os.makedirs(core.STATUS_DIR, exist_ok=True)
+    data = {"ts": time.time(), "pid": os.getpid(),
+            "controls": {i: {"pct": c.cur, "temp": c.temp, "err": c.err} for i, c in ctls.items()}}
+    tmp = core.STATUS + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, core.STATUS)
+
+
+def main():
+    if "--restore" in sys.argv:
+        restore_all()
+        return
+    stop = []
+    for s in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(s, lambda *_: stop.append(1))
+    ctls, mtime, interval, last = {}, None, 1.0, time.monotonic()
+    try:
+        while not stop:
+            try:
+                m = os.stat(core.CONFIG).st_mtime_ns
+            except OSError:
+                m = 0
+            if m != mtime:
+                mtime = m
+                try:
+                    new, interval = load_cfg()
+                    keep = {}
+                    for c in new:
+                        old = ctls.get(c["id"])
+                        if old and old.cfg["fan"] == c["fan"]:
+                            old.cfg = c
+                            keep[c["id"]] = old
+                        else:
+                            try:
+                                keep[c["id"]] = core.Controller(c)
+                            except Exception as e:
+                                log.error("control %s: %s", c.get("name"), e)
+                    for i, o in ctls.items():
+                        if i not in keep:
+                            try: o.fan.release()
+                            except Exception: pass
+                    ctls = keep
+                    log.info("config loaded: %d active control(s)", len(ctls))
+                except Exception as e:
+                    log.error("bad config, keeping previous: %s", e)
+            now = time.monotonic()
+            dt, last = now - last, now
+            for c in ctls.values():
+                try:
+                    c.step(dt)
+                except Exception as e:
+                    if c.err != str(e):
+                        log.error("%s: %s", c.cfg.get("name"), e)
+                    c.err = str(e)
+                    try: c.fan.set(100)      # fail safe
+                    except Exception: pass
+            try:
+                write_status(ctls)
+            except Exception:
+                pass
+            time.sleep(max(0.05, interval - (time.monotonic() - now)))
+    finally:
+        for c in ctls.values():
+            try: c.fan.release()
+            except Exception: pass
+
+
+if __name__ == "__main__":
+    main()

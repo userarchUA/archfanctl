@@ -1,0 +1,8 @@
+#!/usr/bin/env xdg-open
+[Desktop Entry]
+Type=Application
+Name=ArchFanCtl
+Comment=GPU and case fan curve control
+Exec=archfanctl-gui
+Icon=utilities-system-monitor
+Categories=System;Settings;HardwareSettings;
